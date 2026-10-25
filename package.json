@@ -1,0 +1,30 @@
+{
+  "name": "cordova-plugin-app-scheme-cors",
+  "version": "1.0.0",
+  "description": "Serves the bundled www folder over the cordova-ios custom scheme with CORS headers so a remote page can fetch local assets and fonts.",
+  "cordova": {
+    "id": "cordova-plugin-app-scheme-cors",
+    "platforms": [
+      "ios"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ochakov/cordova-plugin-app-scheme-cors.git"
+  },
+  "keywords": [
+    "ecosystem:cordova",
+    "cordova-ios",
+    "wkwebview",
+    "cors"
+  ],
+  "engines": {
+    "cordovaDependencies": {
+      "1.0.0": {
+        "cordova-ios": ">=7.0.0"
+      }
+    }
+  },
+  "author": "Evgeny Ochakov",
+  "license": "MIT"
+}

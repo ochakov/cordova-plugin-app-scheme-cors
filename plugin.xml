@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
+        id="cordova-plugin-app-scheme-cors"
+        version="1.0.0">
+    <name>App Scheme CORS</name>
+    <description>Serves the bundled www folder over the cordova-ios custom scheme (app://localhost) with CORS headers, so a remote web page loaded in the WKWebView can fetch local assets and fonts.</description>
+    <license>MIT</license>
+    <keywords>cordova,ios,wkwebview,scheme,cors,assets</keywords>
+    <engines>
+        <engine name="cordova-ios" version=">=7.0.0" />
+    </engines>
+    <platform name="ios">
+        <config-file target="config.xml" parent="/*">
+            <feature name="AppSchemeCORS">
+                <param name="ios-package" value="CDVAppSchemeCORS" />
+                <param name="onload" value="true" />
+            </feature>
+        </config-file>
+        <header-file src="src/ios/CDVAppSchemeCORS.h" />
+        <source-file src="src/ios/CDVAppSchemeCORS.m" />
+    </platform>
+</plugin>
