@@ -1,16 +1,50 @@
 # cordova-plugin-app-scheme-cors
 
-iOS only. cordova-ios 7+ serves the bundled `www` folder through a `WKURLSchemeHandler` on the
-custom scheme configured in `config.xml` (`<preference name="scheme" value="app" />`,
-`<preference name="hostname" value="localhost" />`), i.e. `app://localhost/<path>`.
-WKWebView cannot intercept `http`/`https`, so this is the only way to reach local files from a
-page loaded from a remote server. Cordova's own handler sends no CORS headers, though, so a
-remote origin can only use the files through plain `<script>`, `<link>` and `<img>` tags:
-`fetch`/XHR and `@font-face` loads are blocked by the browser.
+Serves the bundled `www` folder of a Cordova iOS app over the custom `app://` scheme **with CORS
+headers**, so a web client loaded from a remote server can `fetch` local assets and load local
+web fonts from the app bundle.
 
-This plugin implements `CDVPluginSchemeHandler` and takes over every request on the app scheme
-that carries an `Origin` header (cross-origin `fetch`, XHR, fonts, `crossorigin` tags) plus the
-`OPTIONS` preflight, and answers from the `www` folder with:
+- Platform: iOS only (cordova-ios 7 and 8, WKWebView). On Android nothing is needed: cordova-android
+  already serves `https://localhost/...` through `WebViewAssetLoader`.
+- No JavaScript API. Install it and use `app://localhost/<path>` URLs from your page.
+
+## The problem
+
+cordova-ios 7+ loads local content through a `WKURLSchemeHandler` on the scheme configured in
+`config.xml`:
+
+```xml
+<preference name="scheme" value="app" />
+<preference name="hostname" value="localhost" />
+```
+
+so a file `www/fonts/x.ttf` is reachable as `app://localhost/fonts/x.ttf`. WKWebView does not allow
+a scheme handler for `http` or `https`, so this is the only way to reach bundled files from a page
+that was loaded from a remote origin (a "shell" app whose UI lives on a web server).
+
+The handler shipped with cordova-ios sends no CORS headers. `app://localhost` is a different origin
+from `https://your.server`, so everything the browser subjects to CORS fails from the remote page:
+
+- `fetch()` and `XMLHttpRequest`
+- `@font-face { src: url(app://localhost/fonts/x.ttf) }` (font loads are always CORS requests)
+- `<script crossorigin>`, `<link crossorigin>`, `<img crossorigin>`
+
+Plain `<script>`, `<link rel="stylesheet">` and `<img>` tags without `crossorigin` keep working
+without this plugin.
+
+## What the plugin does
+
+It implements Cordova's `CDVPluginSchemeHandler` protocol (`overrideSchemeTask:`), which lets a plugin
+take over requests on the app scheme before the default handler runs. The plugin handles:
+
+- every `GET`/`HEAD` request on the app scheme that carries an `Origin` header (that is, every
+  cross-origin request the browser makes), and
+- every `OPTIONS` preflight.
+
+Requests without an `Origin` header, in particular the app's own same-origin page loads, are left to
+cordova-ios's default handler, so nothing else in the app changes.
+
+Responses are read from the bundled `www` folder and carry:
 
 ```
 Access-Control-Allow-Origin: <the request's Origin>
@@ -18,38 +52,79 @@ Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, Con
 Vary: Origin
 Accept-Ranges: bytes
 Cache-Control: no-cache
+Content-Type: <from the file extension>
 ```
 
-Requests without an `Origin` header are left to Cordova's default handler, so nothing else changes.
-Only files inside the bundled `www` folder are served (Cordova's `_app_file_` escape hatch is not
-honoured for CORS requests). `Range` requests are supported.
+Details:
+
+- `Range` requests are honoured (`206 Partial Content`, `416` when out of range).
+- `HEAD` returns the headers only.
+- A missing file yields a `404` that still carries the CORS headers, so the page sees a proper
+  error instead of an opaque network failure.
+- Only files inside the bundled `www` folder are served. `..` segments and cordova-ios's
+  `_app_file_` escape hatch are refused for CORS requests.
+- MIME types for web fonts and scripts (`woff`, `woff2`, `ttf`, `otf`, `js`, `mjs`, `css`, `json`,
+  `svg`, `wasm`, ...) are mapped explicitly; everything else uses the system `UTType` lookup.
+- Preflights are answered with `204`, `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`, the
+  requested headers echoed back and a one day `Access-Control-Max-Age`.
 
 ## Install
 
-```
+```sh
 cordova plugin add https://github.com/ochakov/cordova-plugin-app-scheme-cors.git
 ```
 
+Requires cordova-ios 7.0.0 or newer and the custom scheme (the default `app` scheme; `file://`
+loading has no scheme handler and is not supported).
+
 ## Restricting origins
 
-By default any origin is allowed. To restrict, add a preference to `config.xml` with a
-comma-separated list of origins; `*` is accepted as a wildcard for a host label:
+By default any origin is allowed. To allow only your own servers, add a preference to `config.xml`
+with a comma-separated list of origins. `*` matches one host label:
 
 ```xml
 <preference name="AppSchemeCorsOrigins" value="https://online.example.com,https://*.example.com" />
 ```
 
-A request from another origin is handed back to Cordova's handler, which serves the file without
-CORS headers, so the browser blocks it as before.
+A request from any other origin is handed back to the default cordova-ios handler, which serves the
+file without CORS headers, so the browser blocks it exactly as before.
 
 ## Usage from the remote page
 
 ```js
-const r = await fetch('app://localhost/pdfmake.js');
+const response = await fetch('app://localhost/data/config.json');
+const json = await response.json();
 ```
 
 ```css
-@font-face { font-family: X; src: url(app://localhost/fonts/x.woff2); }
+@font-face {
+  font-family: 'MyFont';
+  src: url('app://localhost/fonts/MyFont.woff2') format('woff2');
+}
 ```
 
-The page's Content-Security-Policy must allow the scheme (for example `default-src app://*`).
+```html
+<script src="app://localhost/vendor/pdfmake.min.js"></script>
+```
+
+If the page sets a Content-Security-Policy it must allow the scheme explicitly: `*` in a CSP source
+list matches network schemes only, not custom ones.
+
+```html
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self' https: app://*; font-src 'self' app://*; script-src 'self' https: app://* 'unsafe-inline'">
+```
+
+Note that `response.headers.get('Access-Control-Allow-Origin')` returns `null` in the page: browsers
+never expose the CORS control headers themselves, only the headers listed in
+`Access-Control-Expose-Headers`.
+
+## Tested
+
+cordova-ios 8.1.1, iOS 27 simulator: cross-origin `fetch` (200 and 404), `Range` (206 with
+`Content-Range` visible to the page), a preflighted request with a custom header, `HEAD`, a
+`@font-face` load confirmed by `document.fonts.check()`, and a path traversal attempt (404).
+
+## License
+
+MIT
