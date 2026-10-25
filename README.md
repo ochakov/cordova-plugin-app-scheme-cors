@@ -14,6 +14,7 @@ that carries an `Origin` header (cross-origin `fetch`, XHR, fonts, `crossorigin`
 
 ```
 Access-Control-Allow-Origin: <the request's Origin>
+Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, Content-Type
 Vary: Origin
 Accept-Ranges: bytes
 Cache-Control: no-cache

@@ -51,6 +51,7 @@ static NSString *const kOriginsPreference = @"appschemecorsorigins"; // config.x
     NSString *method = request.HTTPMethod.uppercaseString ?: @"GET";
     NSMutableDictionary<NSString *, NSString *> *headers = [NSMutableDictionary dictionary];
     headers[@"Access-Control-Allow-Origin"] = origin;
+    headers[@"Access-Control-Expose-Headers"] = @"Content-Length, Content-Range, Accept-Ranges, Content-Type";
     headers[@"Vary"] = @"Origin";
 
     if ([method isEqualToString:@"OPTIONS"]) {
