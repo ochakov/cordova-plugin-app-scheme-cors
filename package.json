@@ -1,7 +1,7 @@
 {
   "name": "cordova-plugin-app-scheme-cors",
-  "version": "1.0.0",
-  "description": "Serves the bundled www folder over the cordova-ios custom scheme with CORS headers so a remote page can fetch local assets and fonts.",
+  "version": "1.1.0",
+  "description": "Serves the bundled www folder over the cordova-ios custom scheme with CORS headers and registers the scheme as secure so a remote https page can load local scripts, assets and fonts.",
   "cordova": {
     "id": "cordova-plugin-app-scheme-cors",
     "platforms": [
@@ -20,7 +20,7 @@
   ],
   "engines": {
     "cordovaDependencies": {
-      "1.0.0": {
+      "1.1.0": {
         "cordova-ios": ">=7.0.0"
       }
     }

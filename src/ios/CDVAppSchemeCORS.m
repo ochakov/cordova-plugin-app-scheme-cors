@@ -1,11 +1,95 @@
 #import "CDVAppSchemeCORS.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
 
 static NSString *const kOriginsPreference = @"appschemecorsorigins"; // config.xml preference AppSchemeCorsOrigins (keys are lower-cased by Cordova)
+static NSString *const kRegisterAsSecurePreference = @"appschemeregisterassecure"; // config.xml preference AppSchemeRegisterAsSecure, default true
+
+static BOOL sSchemeRegisteredAsSecure = NO;
 
 @interface CDVAppSchemeCORS ()
 /** Allowed origin patterns (lower-cased, '*' = any label); nil means every origin is allowed. */
 @property (nonatomic, strong, nullable) NSArray<NSString *> *allowedOrigins;
++ (void)registerSchemeAsSecure:(NSString *)scheme onProcessPool:(nullable WKProcessPool *)pool;
+@end
+
+#pragma mark - config.xml preferences
+
+/**
+ * Reads the <preference> entries of the bundled config.xml. The secure-scheme registration has to run
+ * before cordova creates the WKWebView, i.e. before any plugin (and its settings dictionary) exists.
+ */
+@interface CDVAppSchemeCORSConfig : NSObject <NSXMLParserDelegate>
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *preferences; // lower-cased names
+@end
+
+@implementation CDVAppSchemeCORSConfig
+
++ (NSDictionary<NSString *, NSString *> *)preferences
+{
+    static NSDictionary<NSString *, NSString *> *preferences;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        CDVAppSchemeCORSConfig *reader = [CDVAppSchemeCORSConfig new];
+        reader.preferences = [NSMutableDictionary dictionary];
+        NSURL *url = [[NSBundle mainBundle] URLForResource:@"config" withExtension:@"xml"];
+        NSXMLParser *parser = url ? [[NSXMLParser alloc] initWithContentsOfURL:url] : nil;
+        parser.delegate = reader;
+        [parser parse];
+        preferences = [reader.preferences copy];
+    });
+    return preferences;
+}
+
+- (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary<NSString *, NSString *> *)attributes
+{
+    if ([elementName isEqualToString:@"preference"] && attributes[@"name"] != nil && attributes[@"value"] != nil) {
+        self.preferences[attributes[@"name"].lowercaseString] = attributes[@"value"];
+    }
+}
+
++ (BOOL)registerAsSecureEnabled
+{
+    NSString *value = [self preferences][kRegisterAsSecurePreference].lowercaseString;
+    return value == nil || !([value isEqualToString:@"false"] || [value isEqualToString:@"no"] || [value isEqualToString:@"0"]);
+}
+
+/** The scheme cordova-ios serves www over, with CDVWebViewEngine's fallback to "app". */
++ (NSString *)appScheme
+{
+    NSString *scheme = [self preferences][@"scheme"];
+    if (scheme.length == 0 || [WKWebView handlesURLScheme:scheme]) {
+        scheme = @"app";
+    }
+    return scheme;
+}
+
+@end
+
+#pragma mark - WKWebViewConfiguration hook
+
+/**
+ * cordova-ios installs its scheme handler with -[WKWebViewConfiguration setURLSchemeHandler:forURLScheme:]
+ * right before it creates the WKWebView, and WebKit launches the web content processes as soon as the view
+ * exists, handing them the set of secure schemes at launch. A plugin's pluginInitialize runs only after that,
+ * so a registration made there would depend on WebKit forwarding it to a process that is already starting;
+ * this hook registers the scheme before the view and its processes exist, at the moment the scheme is known.
+ */
+@implementation WKWebViewConfiguration (CDVAppSchemeCORS)
+
+- (void)cdvAppSchemeCORS_setURLSchemeHandler:(nullable id<WKURLSchemeHandler>)handler forURLScheme:(NSString *)urlScheme
+{
+    [self cdvAppSchemeCORS_setURLSchemeHandler:handler forURLScheme:urlScheme]; // the original implementation
+    if (handler != nil && [CDVAppSchemeCORSConfig registerAsSecureEnabled]
+        && [urlScheme caseInsensitiveCompare:[CDVAppSchemeCORSConfig appScheme]] == NSOrderedSame) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [CDVAppSchemeCORS registerSchemeAsSecure:urlScheme onProcessPool:self.processPool];
+#pragma clang diagnostic pop
+    }
+}
+
 @end
 
 @implementation CDVAppSchemeCORS
@@ -29,6 +113,53 @@ static NSString *const kOriginsPreference = @"appschemecorsorigins"; // config.x
     NSLog(@"AppSchemeCORS: serving %@://… with CORS headers for %@",
           self.viewController.appScheme ?: @"app",
           self.allowedOrigins ? [self.allowedOrigins componentsJoinedByString:@", "] : @"any origin");
+
+    if ([CDVAppSchemeCORSConfig registerAsSecureEnabled] && !sSchemeRegisteredAsSecure) {
+        // The configuration hook did not run (no scheme handler installed, or another hook replaced it).
+        // Register now anyway; a web content process that is already running will not pick this up.
+        NSLog(@"AppSchemeCORS: scheme not registered as secure before the WKWebView was created, registering now (may be too late)");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        WKProcessPool *pool = [self.webView isKindOfClass:[WKWebView class]] ? ((WKWebView *)self.webView).configuration.processPool : nil;
+#pragma clang diagnostic pop
+        [CDVAppSchemeCORS registerSchemeAsSecure:self.viewController.appScheme ?: @"app" onProcessPool:pool];
+    }
+}
+
+#pragma mark - Mixed content
+
++ (void)load
+{
+    Method original = class_getInstanceMethod([WKWebViewConfiguration class], @selector(setURLSchemeHandler:forURLScheme:));
+    Method hook = class_getInstanceMethod([WKWebViewConfiguration class], @selector(cdvAppSchemeCORS_setURLSchemeHandler:forURLScheme:));
+    if (original != NULL && hook != NULL) {
+        method_exchangeImplementations(original, hook);
+    }
+}
+
+/**
+ * WebKit treats every scheme that is neither https/wss nor registered as secure as insecure content:
+ * a page loaded from https://… that references app://localhost/… gets
+ * "[blocked] The page at … requested insecure content from app://… This content was blocked and must be
+ * served over HTTPS" for scripts, stylesheets, fonts, fetch/XHR and workers, and the request never reaches
+ * the scheme handler (only images and media are exempt, as "upgradable" content). The one switch WebKit
+ * offers is -[WKProcessPool _registerURLSchemeAsSecure:], a private method (FB18346540 asks Apple for a
+ * public one). It is looked up at runtime and skipped when the OS does not have it. The registration is
+ * process-wide and is handed to web content processes when they launch, so it must precede the WKWebView.
+ */
++ (void)registerSchemeAsSecure:(NSString *)scheme onProcessPool:(nullable WKProcessPool *)pool
+{
+    SEL selector = NSSelectorFromString(@"_registerURLSchemeAsSecure:");
+    if (pool == nil || ![pool respondsToSelector:selector]) {
+        NSLog(@"AppSchemeCORS: WKProcessPool has no %@, https pages will treat %@:// as mixed content",
+              NSStringFromSelector(selector), scheme);
+        return;
+    }
+    ((void (*)(id, SEL, NSString *))objc_msgSend)(pool, selector, scheme);
+    if (!sSchemeRegisteredAsSecure) {
+        NSLog(@"AppSchemeCORS: registered %@:// as a secure scheme, https pages may load it", scheme);
+    }
+    sSchemeRegisteredAsSecure = YES;
 }
 
 #pragma mark - CDVPluginSchemeHandler
